@@ -50,7 +50,11 @@ function new_object() {
 }
 
 function red($string) {
-	return "\033[31m{$string}\033[0m";
+	return "\033[0;31m{$string}\033[0m";
+}
+
+function green($string) {
+	return "\033[1;32m{$string}\033[0m";
 }
 
 function cyan($string) {
@@ -66,8 +70,8 @@ function bold($string) {
 }
 
 function message($name, $message, $error=FALSE) {
-	$name = ($error) ? red($name) : cyan($name);
-	echo bold('[') . $name . bold(']') . " " . $message . "\n"; 
+	$name = ($error) ? red($name) : green($name);
+	echo '   [' . $name . "] " . $message . "\n"; 
 }
 
 // works like sprintf
@@ -138,9 +142,11 @@ function svn_validate_branch($branch) {
 // validate local changes are commited, so they aren't lost
 function svn_validate_commited() {
 	$output = joined_execf('svn st %s', svn_info()->local_root);
-	if (strlen($output)) { throw new UncommittedException(); }
-		//red("Pending changes from your working copy root, svn add/commit/revert/resolve to continue.") . 
-		//"\n$output"
+	if (strlen($output)) { 
+		throw new UncommittedException(
+			'There are pending changes in your working copy root, svn add/commit/revert/resolve'	
+		); 
+	}
 }
 
 function svn_validate_resolved() {
@@ -250,7 +256,7 @@ function svn_delete_branch($branch) {
 	message('DELETE', 'Removed branch ' . under($branch));
 }
 
-function svn_merge_branch($branch) {
+function svn_merge_branch($branch, $merge_only=FALSE) {
 	svn_validate_branch($branch);
 	svn_switch_trunk();
 	
@@ -267,6 +273,11 @@ function svn_merge_branch($branch) {
 	
 	try {
 		svn_validate_resolved();
+		
+		if ($merge_only) {
+			return;
+		}
+		
 		svn_commit('Merged branch [' . $branch . '] into trunk');
 		svn_delete_branch($branch);
 	} catch (ConflictedException $e) {
@@ -275,8 +286,8 @@ function svn_merge_branch($branch) {
 			'Merge into trunk is conflicted. Resolve, commit, and then delete branch with ' . bold('switch -d ' . $branch),
 			TRUE
 		);
-		exit();
 	}
+	return;
 }
 
 function svn_create_branch($branch) {
@@ -335,7 +346,23 @@ function svn_switch_branch($branch) {
 }
 
 function help() {
-	echo "Not Yet!\n";
+
+echo "  " . cyan("Switch!") . " (because SVN switching/branching/merging should be fun)
+
+  USAGE
+     switch [option] [branch]
+     switch [branch]
+  
+  OPTIONS
+     -h, --help        Show this message
+     -s, --switch      Switch working copy to [branch]
+     -c, --create      Creates new [branch]
+     -m, --merge       Merge [branch] into trunk, commit changes to trunk, then delete [branch]
+     -n, --merge-only  Merge [branch] into trunk, no commit, no delete
+     -d, --delete      Delete [branch]
+     -l, --list        List branches
+
+	";
 }
 
 function run() {
@@ -352,6 +379,10 @@ function run() {
 		case '--merge':
 			svn_merge_branch($opts[1]);
 			break;
+		case '-n':
+		case '--merge-only':
+			svn_merge_branch($opts[1], TRUE);
+			break;
 		case '-c':
 		case '--create':
 			svn_create_branch($opts[1]);
@@ -367,6 +398,7 @@ function run() {
 		case '-h':
 		case '--help':
 			help();
+			break;
 		case '-l':
 		case '--list':
 		default:
@@ -378,41 +410,27 @@ function run() {
 function svn_list_branches($detailed=FALSE) {
 	svn_info();
 	
-	echo "\n";
-	
-	$line = sprintf(
-		under("trunk") . " @r%s",
-		svn_info()->trunk_last_rev
-	);
-	
+	$name = under('trunk');
 	if (svn_info()->active_branch == 'trunk') {
-		$line = $line . " " . cyan(under('WORKING COPY'));
+		$name = cyan($name);
 	}
-	echo $line . "\n";
+	
+	echo sprintf("  {$name} r%s\n", svn_info()->trunk_last_rev);
 	
 	foreach(svn_info()->branches as $branch) {
-		$line = sprintf(
-		under("%s") . " @r%s",
-			$branch->name,
-			$branch->last_rev
-		);
+
+		$name = under($branch->name);
 		if (svn_info()->active_branch == $branch->name) {
-			$line = $line . " " . cyan(under('WORKING COPY'));
+			$name = cyan($name);
 		}		
-		echo " ■ " . $line . " \n";
-		
-		// echo sprintf(
-		// "  (created @r%s (%s) by %s)\n",
-		// 	$branch->start_rev,
-		// 	date('Y-m-d', $branch->start_date),
-		// 	$branch->start_user
-		// );
+
+	 	echo sprintf("   ■ {$name} r%s:%s\n", $branch->start_rev, $branch->last_rev);
 	}
-	
-	echo "\n";
 }
 
 # start
+
+echo "\n";
 
 try {
 	run();
@@ -421,3 +439,6 @@ try {
 } catch (Exception $e) {
 	message('ERROR', $e->getMessage(), TRUE);
 }
+
+echo "\n";
+exit();
