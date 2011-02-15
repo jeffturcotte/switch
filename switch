@@ -1,0 +1,423 @@
+#! /usr/bin/php
+<?php
+/**
+ * Switch! A tiny svn util.
+ *
+ * @copyright  Copyright (c) 2011 Jeff Turcotte
+ * @author     Jeff Turcotte [jt] <jeff.turcotte@gmail.com>
+ * @license    MIT
+ * @version    1.0.0b1
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following
+ * conditions:
+ * 
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */ 
+
+// =================
+// = initial setup =
+// =================
+
+// set timezone
+$timezone = getenv('SWITCH_TIMEZONE');
+$timezone = ($timezone) ? $timezone : 'America/New_York';
+date_default_timezone_set($timezone);
+
+// ====================
+// = helper functions =
+// ====================
+
+function new_object() {
+	$obj = (object) '';
+	unset($obj->scalar);
+	return $obj;
+}
+
+function red($string) {
+	return "\033[31m{$string}\033[0m";
+}
+
+function cyan($string) {
+	return "\033[1;36m{$string}\033[0m";
+}
+
+function under($string) {
+	return "\033[4m{$string}\033[0m";
+}
+
+function bold($string) {
+	return "\033[1m{$string}\033[0m";
+}
+
+function message($name, $message, $error=FALSE) {
+	$name = ($error) ? red($name) : cyan($name);
+	echo bold('[') . $name . bold(']') . " " . $message . "\n"; 
+}
+
+// works like sprintf
+// execs and returns array output
+function execf() {
+	$args = func_get_args();
+	$command = call_user_func_array('sprintf', $args);
+	exec($command, $output);
+	return $output;
+}
+
+// execf results in a single blob
+function joined_execf() {
+	$output = call_user_func_array(
+		'execf', $args = func_get_args()
+	);
+	return join("\n", $output);
+}
+
+// ==================
+// = core functions =
+// ==================
+
+class MissingBranchException extends Exception {}
+class UncommittedException extends Exception {}
+class ConflictedException extends Exception {}
+
+// find the local root of the checked out repo
+function svn_local_root() {
+	$dir = '.';
+	if (!is_dir("$dir/.svn")) {
+		throw new Exception(
+			red('Working directory is not an SVN repository.')
+		);
+	}
+	while (is_dir("../$dir/.svn")) {
+		$dir = "../$dir";
+	}
+	return realpath($dir);
+}
+
+// make sure the remote repo is setup properly
+// with at least /trunk and /branches directories
+function svn_validate_repository($remote_root) {
+	$output = joined_execf("svn list %s", $remote_root);
+	
+	if (!preg_match('/^branches\/$/m', $output) && !preg_match('/^trunk\/$/m', $output)) {
+		throw new Exception(
+			red('Your SVN repository is not set up with standard /trunk and /branches directories.')
+		);
+	}
+}
+
+// validate that the branch exists in the repo
+function svn_validate_branch($branch) {
+	if ($branch == 'trunk') {
+		throw new Exception(
+			red('The trunk cannot be used for this function.')
+		);
+	}
+	if (!in_array($branch, array_keys(svn_info()->branches))) {
+		throw new MissingBranchException(
+			'The branch ' . under($branch) . ' does not exist'
+		);
+	}
+}
+
+// validate local changes are commited, so they aren't lost
+function svn_validate_commited() {
+	$output = joined_execf('svn st %s', svn_info()->local_root);
+	if (strlen($output)) { throw new UncommittedException(); }
+		//red("Pending changes from your working copy root, svn add/commit/revert/resolve to continue.") . 
+		//"\n$output"
+}
+
+function svn_validate_resolved() {
+	$output = joined_execf('svn st %s', svn_info()->local_root);
+	if (preg_match('/^\s*C\s/m', $output)) { throw new ConflictedException(); }
+}
+
+// parses the top line of a log message
+function svn_parse_log($log) {
+	list($rev, $user, $date) = preg_split('/(\s*\|\s*)/', $log);
+	$rev  = substr($rev, 1);
+	$time = strtotime(substr($date, 0, 19));
+	return array($rev, $user, $time);
+}
+
+// get the repository and branch info
+function svn_info() {
+	static $info = NULL;
+		
+	// return cached info
+	if (is_object($info)) {
+		return $info;
+	}
+	
+	$info = new_object();
+	$info->local_root = svn_local_root();
+	$info->branches = array();
+
+	// get repository info locally
+	$output = joined_execf("svn info %s", $info->local_root);
+	preg_match('/^Repository Root: (.*)/m', $output, $matches);
+	$info->remote_root = $matches[1];
+	
+	preg_match('/^URL: (.*)/m', $output, $matches);
+	$info->url = $matches[1];
+
+	$quoted_remote_root  = preg_quote($info->remote_root, '/');
+	$info->active_branch = preg_replace('/^'.$quoted_remote_root.'\/?/', '', $info->url);
+	$info->active_branch = preg_replace('/^branches\//', '', $info->active_branch);
+	
+	if (!$info->active_branch || strpos($info->active_branch, '/') !== FALSE) {
+		$info->active_branch = NULL;
+	}
+	
+	// validate repository structure
+	svn_validate_repository($info->remote_root);
+
+	// get trunk info
+	$output = execf('svn log -q -l 1 %s/trunk', $info->remote_root);
+	list($rev, $user, $date) = svn_parse_log($output[1]);
+	$info->trunk_last_rev = $rev;
+	$info->trunk_last_user = $user;
+	$info->trunk_last_date = $date;
+	
+	// get branch names
+	$branches = execf("svn list %s/branches", $info->remote_root);
+
+	foreach($branches as $name) {
+		$branch = new_object();
+		
+		$name = preg_replace('/\/$/', '', $name);
+		$branch->name = $name;
+		
+		$output = execf(
+			'svn log -q --stop-on-copy %s/branches/%s', 
+			$info->remote_root, 
+			$name
+		);
+		
+		$last_rev = array_shift(array_slice($output, 1, 1));
+		list($rev, $user, $date) = svn_parse_log($last_rev);
+		$branch->last_rev = $rev;
+		$branch->last_user = $user;
+		$branch->last_date = $date;
+		
+		$start_rev = array_shift(array_slice($output, -2, 1));
+		list($rev, $user, $date) = svn_parse_log($start_rev);
+		$branch->start_rev = $rev;
+		$branch->start_user = $user;
+		$branch->start_date = $date;
+		
+		$info->branches[$branch->name] = $branch;
+	}
+	return $info;
+}
+
+function svn_commit($msg) {
+	$output = joined_execf(
+		'cd %s && svn commit -m \'%s\'',
+		svn_info()->local_root,
+		$msg
+	);
+	
+	message('COMMIT', 'Commited merge to remote repository');
+}
+
+function svn_delete_branch($branch) {
+	svn_validate_branch($branch);
+
+	execf(
+		"svn delete %s/branches/%s -m '%s'",
+		svn_info()->remote_root,
+		$branch,
+		"Deleted branch [$branch]"
+	);
+	
+	message('DELETE', 'Removed branch ' . under($branch));
+}
+
+function svn_merge_branch($branch) {
+	svn_validate_branch($branch);
+	svn_switch_trunk();
+	
+	execf(
+		"cd %s && svn merge --accept 'postpone' -r%s:%s %s/branches/%s .",
+		svn_info()->local_root,
+		svn_info()->branches[$branch]->start_rev,
+		'HEAD',
+		svn_info()->remote_root,
+		$branch
+	);
+	
+	message('MERGE', 'Merged branch ' . under($branch) . ' into ' . under('trunk'));
+	
+	try {
+		svn_validate_resolved();
+		svn_commit('Merged branch [' . $branch . '] into trunk');
+		svn_delete_branch($branch);
+	} catch (ConflictedException $e) {
+		message(
+			'CONFLICTS', 
+			'Merge into trunk is conflicted. Resolve, commit, and then delete branch with ' . bold('switch -d ' . $branch),
+			TRUE
+		);
+		exit();
+	}
+}
+
+function svn_create_branch($branch) {
+	try {
+		svn_validate_branch($branch);
+		message('ERROR', 'Branch  ' . under($branch) . ' already exists');
+		exit();
+	} catch (MissingBranchException $e) {}
+	
+	execf(
+		"svn cp %s/trunk %s/branches/%s -m '%s'",
+		svn_info()->remote_root,
+		svn_info()->remote_root,
+		$branch,
+		"Created branch $branch"
+	);
+	
+	message('BRANCH', 'Created branch ' . under($branch));
+}
+
+function svn_switch($branch) {
+	svn_info();
+
+	if ($branch == 'trunk') {
+		svn_switch_trunk();
+		return;
+	}
+	
+	svn_switch_branch($branch);
+}
+
+function svn_switch_trunk() {
+	svn_validate_commited();	
+
+	$output = execf(
+		'cd %s && svn switch --accept \'theirs-full\' %s/trunk',
+		svn_info()->local_root,
+		svn_info()->remote_root
+	);
+	
+	message('SWITCH', 'Switched working copy to ' . under('trunk'));
+}
+
+function svn_switch_branch($branch) {
+	svn_validate_branch($branch);
+	svn_validate_commited();	
+
+	$output = execf(
+		'cd %s && svn switch --accept \'theirs-full\' %s/branches/%s',
+		svn_info()->local_root,
+		svn_info()->remote_root,
+		$branch
+	);
+
+	message('SWITCH', 'Switched working copy to ' . under($branch));
+}
+
+function help() {
+	echo "Not Yet!\n";
+}
+
+function run() {
+	global $argv;
+	$opts  = array_slice($argv, 1);
+	$count = count($opts);
+	
+	if (strpos($opts[0], '-') !== 0 && $count == 1) {
+		array_unshift($opts, '-s');
+	}
+	
+	switch($opts[0]){
+		case '-m':
+		case '--merge':
+			svn_merge_branch($opts[1]);
+			break;
+		case '-c':
+		case '--create':
+			svn_create_branch($opts[1]);
+			break;
+		case '-s':
+		case '--switch':
+			svn_switch($opts[1]);
+			break;
+		case '-d':
+		case '--delete':
+			svn_delete_branch($opts[1]);
+			break;
+		case '-h':
+		case '--help':
+			help();
+		case '-l':
+		case '--list':
+		default:
+			svn_list_branches();
+			break;
+	}
+}
+
+function svn_list_branches($detailed=FALSE) {
+	svn_info();
+	
+	echo "\n";
+	
+	$line = sprintf(
+		under("trunk") . " @r%s",
+		svn_info()->trunk_last_rev
+	);
+	
+	if (svn_info()->active_branch == 'trunk') {
+		$line = $line . " " . cyan(under('WORKING COPY'));
+	}
+	echo $line . "\n";
+	
+	foreach(svn_info()->branches as $branch) {
+		$line = sprintf(
+		under("%s") . " @r%s",
+			$branch->name,
+			$branch->last_rev
+		);
+		if (svn_info()->active_branch == $branch->name) {
+			$line = $line . " " . cyan(under('WORKING COPY'));
+		}		
+		echo " ■ " . $line . " \n";
+		
+		// echo sprintf(
+		// "  (created @r%s (%s) by %s)\n",
+		// 	$branch->start_rev,
+		// 	date('Y-m-d', $branch->start_date),
+		// 	$branch->start_user
+		// );
+	}
+	
+	echo "\n";
+}
+
+# start
+
+try {
+	run();
+} catch (MissingBranchException $e) {
+	message('ERROR', $e->getMessage(), TRUE);
+} catch (Exception $e) {
+	message('ERROR', $e->getMessage(), TRUE);
+}
