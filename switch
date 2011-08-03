@@ -79,7 +79,10 @@ function message($name, $message, $error=FALSE) {
 function execf() {
 	$args = func_get_args();
 	$command = call_user_func_array('sprintf', $args);
-	exec($command, $output);
+	exec($command . ' 2>&1', $output, $return_value);
+	if ($return_value) {
+		throw new CommandException(join("\n", $output));
+	}
 	return $output;
 }
 
@@ -98,6 +101,7 @@ function joined_execf() {
 class MissingBranchException extends Exception {}
 class UncommittedException extends Exception {}
 class ConflictedException extends Exception {}
+class CommandException extends Exception {}
 
 // find the local root of the checked out repo
 function svn_local_root() {
@@ -202,7 +206,11 @@ function svn_info() {
 	$info->trunk_last_date = $date;
 	
 	// get branch names
-	$branches = execf("svn list %s/branches", $info->remote_root);
+	try {
+		$branches = execf("svn list %s/branches", $info->remote_root);
+	} catch (CommandException $e) {
+		throw new Exception('No /branches folder was found in the repository');
+	}
 
 	foreach($branches as $name) {
 		$branch = new_object();
@@ -438,11 +446,14 @@ echo "\n";
 
 try {
 	run();
+	$return_val = 0;
 } catch (MissingBranchException $e) {
 	message('ERROR', $e->getMessage(), TRUE);
+	$return_val = 1;
 } catch (Exception $e) {
 	message('ERROR', $e->getMessage(), TRUE);
+	$return_val = 1;
 }
 
 echo "\n";
-exit();
+exit($return_val);
