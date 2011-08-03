@@ -122,7 +122,7 @@ function svn_local_root() {
 function svn_validate_repository($remote_root) {
 	$output = joined_execf("svn list %s", $remote_root);
 	
-	if (!preg_match('/^branches\/$/m', $output) && !preg_match('/^trunk\/$/m', $output)) {
+	if (!preg_match('/^branches\/$/m', $output) || !preg_match('/^trunk\/$/m', $output)) {
 		throw new Exception(
 			red('Your SVN repository is not set up with standard /trunk and /branches directories.')
 		);
@@ -206,11 +206,7 @@ function svn_info() {
 	$info->trunk_last_date = $date;
 	
 	// get branch names
-	try {
-		$branches = execf("svn list %s/branches", $info->remote_root);
-	} catch (CommandException $e) {
-		throw new Exception('No /branches folder was found in the repository');
-	}
+	$branches = execf("svn list %s/branches", $info->remote_root);
 
 	foreach($branches as $name) {
 		$branch = new_object();
