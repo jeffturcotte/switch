@@ -370,6 +370,10 @@ function run() {
 	$opts  = array_slice($argv, 1);
 	$count = count($opts);
 	
+	if (!isset($opts[0])) {
+		$opts[0] = '-l';
+	}
+
 	if (strpos($opts[0], '-') !== 0 && $count == 1) {
 		array_unshift($opts, '-s');
 	}
