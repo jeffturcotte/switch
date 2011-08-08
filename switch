@@ -79,7 +79,10 @@ function message($name, $message, $error=FALSE) {
 function execf() {
 	$args = func_get_args();
 	$command = call_user_func_array('sprintf', $args);
-	exec($command, $output);
+	exec($command . ' 2>&1', $output, $return_value);
+	if ($return_value) {
+		throw new CommandException(join("\n", $output));
+	}
 	return $output;
 }
 
@@ -98,6 +101,7 @@ function joined_execf() {
 class MissingBranchException extends Exception {}
 class UncommittedException extends Exception {}
 class ConflictedException extends Exception {}
+class CommandException extends Exception {}
 
 // find the local root of the checked out repo
 function svn_local_root() {
@@ -118,7 +122,7 @@ function svn_local_root() {
 function svn_validate_repository($remote_root) {
 	$output = joined_execf("svn list %s", $remote_root);
 	
-	if (!preg_match('/^branches\/$/m', $output) && !preg_match('/^trunk\/$/m', $output)) {
+	if (!preg_match('/^branches\/$/m', $output) || !preg_match('/^trunk\/$/m', $output)) {
 		throw new Exception(
 			red('Your SVN repository is not set up with standard /trunk and /branches directories.')
 		);
@@ -370,6 +374,10 @@ function run() {
 	$opts  = array_slice($argv, 1);
 	$count = count($opts);
 	
+	if (!isset($opts[0])) {
+		$opts[0] = '-l';
+	}
+
 	if (strpos($opts[0], '-') !== 0 && $count == 1) {
 		array_unshift($opts, '-s');
 	}
@@ -434,11 +442,14 @@ echo "\n";
 
 try {
 	run();
+	$return_val = 0;
 } catch (MissingBranchException $e) {
 	message('ERROR', $e->getMessage(), TRUE);
+	$return_val = 1;
 } catch (Exception $e) {
 	message('ERROR', $e->getMessage(), TRUE);
+	$return_val = 1;
 }
 
 echo "\n";
-exit();
+exit($return_val);
